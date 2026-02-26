@@ -1,0 +1,38 @@
+{
+  "name": "claude-gitlab-plugin",
+  "version": "1.0.0",
+  "description": "Claude Code MCP connector for GitLab - interact with GitLab repositories, issues, merge requests, and pipelines",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "claude-gitlab-plugin": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node --esm src/index.ts",
+    "start": "node dist/index.js",
+    "lint": "eslint src/**/*.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "node-fetch": "^3.3.2",
+    "zod": "^3.22.4",
+    "zod-to-json-schema": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "claude",
+    "mcp",
+    "gitlab",
+    "connector",
+    "plugin"
+  ],
+  "license": "MIT"
+}
