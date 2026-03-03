@@ -34,6 +34,9 @@ The connector is configured via environment variables:
 |---|---|---|---|
 | `GITLAB_TOKEN` | **Yes** | — | Personal Access Token with `api` scope |
 | `GITLAB_URL` | No | `https://gitlab.com` | GitLab instance URL (for self-hosted GitLab) |
+| `MODE` | No | `stdio` | Transport: `stdio` (Claude Code CLI) or `http` (Claude.ai web) |
+| `PORT` | No | `3000` | HTTP port (http mode only) |
+| `MCP_SECRET` | In http mode | — | Bearer token for authentication (http mode only) |
 
 ### Creating a GitLab Personal Access Token
 
@@ -41,9 +44,11 @@ The connector is configured via environment variables:
 2. Create a token with the **`api`** scope
 3. Copy the token value
 
-## Adding to Claude Code
+## Mode 1: Claude Code CLI (stdio, local)
 
-Add the connector to your Claude Code MCP configuration (`~/.claude.json` or `.claude/mcp.json`):
+Standard local setup — Claude Code manages the process automatically.
+
+Add to `~/.claude.json`:
 
 ```json
 {
@@ -75,6 +80,79 @@ For self-hosted GitLab:
     }
   }
 }
+```
+
+## Mode 2: Claude.ai Web Connector (HTTP, remote)
+
+Run the server on a VPS to use it from **any browser including iPhone**.
+
+### 1. Generate a secret
+
+```bash
+openssl rand -hex 32
+# example output: a3f8c2e1d4b5...
+```
+
+### 2. Start the server on your VPS
+
+```bash
+GITLAB_TOKEN=glpat-xxx \
+GITLAB_URL=https://gitlab.com \
+MODE=http \
+PORT=3000 \
+MCP_SECRET=<your-secret> \
+node /path/to/Claude-Gitlab-Plugin/dist/index.js
+```
+
+With HTTPS via nginx (recommended):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name mcp.yourdomain.com;
+
+    ssl_certificate     /etc/letsencrypt/live/mcp.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp.yourdomain.com/privkey.pem;
+
+    location /mcp {
+        proxy_pass http://127.0.0.1:3000/mcp;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+### 3. Add to Claude.ai
+
+Go to **claude.ai → Settings → Connectors** → Add connector:
+
+- **URL**: `https://mcp.yourdomain.com/mcp`
+- **Auth**: Bearer token → paste your `MCP_SECRET`
+
+After saving, the GitLab tools will be available in Claude.ai web and iOS app.
+
+### Run as a systemd service (VPS)
+
+```ini
+# /etc/systemd/system/claude-gitlab-mcp.service
+[Unit]
+Description=Claude GitLab MCP Connector
+After=network.target
+
+[Service]
+ExecStart=node /path/to/Claude-Gitlab-Plugin/dist/index.js
+Restart=always
+Environment=GITLAB_TOKEN=glpat-xxx
+Environment=GITLAB_URL=https://gitlab.com
+Environment=MODE=http
+Environment=PORT=3000
+Environment=MCP_SECRET=your-secret-here
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl enable --now claude-gitlab-mcp
 ```
 
 ## Available Tools
