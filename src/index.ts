@@ -262,15 +262,37 @@ async function startHttp(): Promise<void> {
     });
   };
 
-  const server = useHttps
-    ? https.createServer(
-        {
-          cert: fs.readFileSync(SSL_CERT_PATH),
-          key: fs.readFileSync(SSL_KEY_PATH),
-        },
-        wrapHandler
-      )
-    : http.createServer(wrapHandler);
+  let server: http.Server | https.Server;
+  if (useHttps) {
+    let cert: Buffer, key: Buffer;
+    try {
+      cert = fs.readFileSync(SSL_CERT_PATH);
+      key = fs.readFileSync(SSL_KEY_PATH);
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === "EACCES") {
+        console.error(
+          `Error: cannot read SSL certificate/key (permission denied).\n` +
+            `  cert: ${SSL_CERT_PATH}\n` +
+            `  key:  ${SSL_KEY_PATH}\n\n` +
+            `Fix options:\n` +
+            `  1. Run the server as root (not recommended)\n` +
+            `  2. Copy certs to a user-readable location:\n` +
+            `       sudo cp ${SSL_CERT_PATH} ~/cert.pem\n` +
+            `       sudo cp ${SSL_KEY_PATH} ~/key.pem\n` +
+            `       sudo chown $USER ~/cert.pem ~/key.pem\n` +
+            `  3. Use a reverse proxy (nginx/caddy) that handles TLS\n` +
+            `     and set MODE=http with the proxy forwarding to this server.`
+        );
+      } else {
+        console.error(`Error: failed to read SSL files — ${e.message}`);
+      }
+      process.exit(1);
+    }
+    server = https.createServer({ cert, key }, wrapHandler);
+  } else {
+    server = http.createServer(wrapHandler);
+  }
 
   server.listen(PORT, () => {
     const proto = useHttps ? "https" : "http";
