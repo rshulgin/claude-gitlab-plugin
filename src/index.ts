@@ -101,6 +101,39 @@ function isValidToken(token: string): boolean {
   return true;
 }
 
+// ── Authorization Code store (OAuth 2.1 + PKCE) ───────────────────────────────
+
+type AuthCodeEntry = {
+  client_id: string;
+  redirect_uri: string;
+  code_challenge?: string;
+  code_challenge_method?: string;
+  expires: number;
+};
+
+const authCodeStore = new Map<string, AuthCodeEntry>();
+
+function issueAuthCode(entry: Omit<AuthCodeEntry, "expires">): string {
+  const code = crypto.randomBytes(16).toString("hex");
+  authCodeStore.set(code, { ...entry, expires: Date.now() + 60_000 }); // 1 min
+  return code;
+}
+
+function verifyPKCE(
+  verifier: string,
+  challenge: string,
+  method: string
+): boolean {
+  if (method === "S256") {
+    const hash = crypto
+      .createHash("sha256")
+      .update(verifier)
+      .digest("base64url");
+    return hash === challenge;
+  }
+  return verifier === challenge; // plain (not recommended but spec allows it)
+}
+
 // ── Tool registry ─────────────────────────────────────────────────────────────
 
 const client = new GitLabClient({ baseUrl: GITLAB_URL, token: GITLAB_TOKEN });
@@ -193,11 +226,55 @@ async function requestHandler(
     res.end(
       JSON.stringify({
         issuer: SERVER_URL,
+        authorization_endpoint: `${SERVER_URL}/oauth/authorize`,
         token_endpoint: `${SERVER_URL}/oauth/token`,
-        grant_types_supported: ["client_credentials"],
-        token_endpoint_auth_methods_supported: ["client_secret_post"],
+        grant_types_supported: ["authorization_code", "client_credentials"],
+        response_types_supported: ["code"],
+        code_challenge_methods_supported: ["S256"],
+        token_endpoint_auth_methods_supported: [
+          "client_secret_post",
+          "none",
+        ],
       })
     );
+    return;
+  }
+
+  // ── OAuth authorization endpoint (Authorization Code flow) ───────────────
+  if (req.method === "GET" && req.url?.startsWith("/oauth/authorize")) {
+    if (!useOAuth) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "OAuth not configured" }));
+      return;
+    }
+    const urlObj = new URL(req.url, SERVER_URL);
+    const clientId = urlObj.searchParams.get("client_id") ?? "";
+    const redirectUri = urlObj.searchParams.get("redirect_uri") ?? "";
+    const state = urlObj.searchParams.get("state") ?? "";
+    const codeChallenge = urlObj.searchParams.get("code_challenge") ?? undefined;
+    const codeChallengeMethod =
+      urlObj.searchParams.get("code_challenge_method") ?? undefined;
+
+    if (!redirectUri) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "missing redirect_uri" }));
+      return;
+    }
+
+    // Auto-approve: issue authorization code and redirect back immediately
+    const code = issueAuthCode({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_challenge: codeChallenge,
+      code_challenge_method: codeChallengeMethod,
+    });
+
+    const redirect = new URL(redirectUri);
+    redirect.searchParams.set("code", code);
+    if (state) redirect.searchParams.set("state", state);
+
+    res.writeHead(302, { Location: redirect.toString() });
+    res.end();
     return;
   }
 
@@ -210,18 +287,70 @@ async function requestHandler(
     }
     const raw = await readBodyRaw(req);
     const params = new URLSearchParams(raw);
-    if (
-      params.get("grant_type") !== "client_credentials" ||
-      params.get("client_id") !== OAUTH_CLIENT_ID ||
-      params.get("client_secret") !== OAUTH_CLIENT_SECRET
-    ) {
-      res.writeHead(401, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "invalid_client" }));
+    const grantType = params.get("grant_type");
+
+    if (grantType === "authorization_code") {
+      const code = params.get("code") ?? "";
+      const redirectUri = params.get("redirect_uri") ?? "";
+      const codeVerifier = params.get("code_verifier") ?? undefined;
+
+      const entry = authCodeStore.get(code);
+      if (!entry || Date.now() > entry.expires) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_grant" }));
+        return;
+      }
+      authCodeStore.delete(code); // single-use
+
+      if (entry.redirect_uri !== redirectUri) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "redirect_uri_mismatch" }));
+        return;
+      }
+
+      // Verify PKCE if present
+      if (entry.code_challenge && entry.code_challenge_method) {
+        if (!codeVerifier) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "missing code_verifier" }));
+          return;
+        }
+        if (
+          !verifyPKCE(
+            codeVerifier,
+            entry.code_challenge,
+            entry.code_challenge_method
+          )
+        ) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_grant" }));
+          return;
+        }
+      }
+
+      const token = issueToken();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ...token, token_type: "Bearer" }));
       return;
     }
-    const token = issueToken();
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ...token, token_type: "Bearer" }));
+
+    if (grantType === "client_credentials") {
+      if (
+        params.get("client_id") !== OAUTH_CLIENT_ID ||
+        params.get("client_secret") !== OAUTH_CLIENT_SECRET
+      ) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_client" }));
+        return;
+      }
+      const token = issueToken();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ...token, token_type: "Bearer" }));
+      return;
+    }
+
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "unsupported_grant_type" }));
     return;
   }
 
@@ -229,7 +358,10 @@ async function requestHandler(
   const authHeader = req.headers["authorization"] ?? "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
   if (!isValidToken(token)) {
-    res.writeHead(401, { "Content-Type": "application/json" });
+    res.writeHead(401, {
+      "Content-Type": "application/json",
+      "WWW-Authenticate": `Bearer realm="${SERVER_URL}"`,
+    });
     res.end(JSON.stringify({ error: "Unauthorized" }));
     return;
   }
