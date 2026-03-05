@@ -1,0 +1,38 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+
+            git pull origin main
+
+            npm ci --omit=dev
+            npm run build
+
+            # Write env file (overwrite on each deploy)
+            cat > .env <<EOF
+            GITLAB_TOKEN=${{ secrets.GITLAB_TOKEN }}
+            GITLAB_URL=${{ secrets.GITLAB_URL }}
+            MODE=http
+            PORT=3003
+            MCP_SECRET=${{ secrets.MCP_SECRET }}
+            EOF
+
+            sudo systemctl restart claude-gitlab-mcp
+            sudo systemctl is-active --quiet claude-gitlab-mcp && echo "Service is running"
