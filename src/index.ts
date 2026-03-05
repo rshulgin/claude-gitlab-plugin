@@ -217,6 +217,21 @@ async function requestHandler(
   req: http.IncomingMessage,
   res: http.ServerResponse
 ): Promise<void> {
+  // ── OAuth Protected Resource Metadata (RFC 9470) ────────────────────────
+  if (
+    req.method === "GET" &&
+    req.url === "/.well-known/oauth-protected-resource"
+  ) {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        resource: SERVER_URL,
+        authorization_servers: [SERVER_URL],
+      })
+    );
+    return;
+  }
+
   // ── OAuth discovery (RFC 8414) ───────────────────────────────────────────
   if (
     req.method === "GET" &&
@@ -360,7 +375,7 @@ async function requestHandler(
   if (!isValidToken(token)) {
     res.writeHead(401, {
       "Content-Type": "application/json",
-      "WWW-Authenticate": `Bearer realm="${SERVER_URL}"`,
+      "WWW-Authenticate": `Bearer realm="${SERVER_URL}", resource_metadata="${SERVER_URL}/.well-known/oauth-protected-resource"`,
     });
     res.end(JSON.stringify({ error: "Unauthorized" }));
     return;
