@@ -466,6 +466,30 @@ async function startHttp(): Promise<void> {
     server = http.createServer(wrapHandler);
   }
 
+  // Log every incoming TCP connection (before TLS handshake / HTTP parsing)
+  server.on("connection", (socket) => {
+    const remote = `${socket.remoteAddress}:${socket.remotePort}`;
+    console.error(`[TCP] connection from ${remote}`);
+    socket.on("close", (hadError: boolean) => {
+      console.error(`[TCP] closed ${remote}${hadError ? " (error)" : ""}`);
+    });
+    socket.on("error", (err: Error) => {
+      console.error(`[TCP] error ${remote}: ${err.message}`);
+    });
+  });
+
+  if (useHttps) {
+    // For HTTPS: log successful TLS handshakes and TLS-level errors separately
+    (server as https.Server).on("secureConnection", (socket) => {
+      const tlsSock = socket as import("tls").TLSSocket;
+      console.error(`[TLS] handshake OK from ${tlsSock.remoteAddress} (${tlsSock.getProtocol() ?? "?"}) sni=${tlsSock.servername ?? "none"}`);
+    });
+    (server as https.Server).on("tlsClientError", (err: Error, socket) => {
+      const tlsSock = socket as import("tls").TLSSocket;
+      console.error(`[TLS] handshake FAILED from ${tlsSock.remoteAddress ?? "?"}: ${err.message}`);
+    });
+  }
+
   server.listen(PORT, () => {
     const proto = useHttps ? "https" : "http";
     const authMode = useOAuth
