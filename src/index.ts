@@ -213,6 +213,14 @@ async function startStdio(): Promise<void> {
 
 // ── HTTP/HTTPS mode ───────────────────────────────────────────────────────────
 
+function log(status: number, req: http.IncomingMessage, extra?: string): void {
+  const ts = new Date().toISOString();
+  const ua = (req.headers["user-agent"] ?? "").slice(0, 60);
+  const base = `[${ts}] ${status} ${req.method} ${req.url}`;
+  console.error(extra ? `${base} — ${extra}` : base);
+  if (ua) console.error(`          UA: ${ua}`);
+}
+
 async function requestHandler(
   req: http.IncomingMessage,
   res: http.ServerResponse
@@ -222,6 +230,7 @@ async function requestHandler(
     req.method === "GET" &&
     req.url === "/.well-known/oauth-protected-resource"
   ) {
+    log(200, req);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
@@ -237,6 +246,7 @@ async function requestHandler(
     req.method === "GET" &&
     req.url === "/.well-known/oauth-authorization-server"
   ) {
+    log(200, req);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
@@ -258,6 +268,7 @@ async function requestHandler(
   // ── OAuth authorization endpoint (Authorization Code flow) ───────────────
   if (req.method === "GET" && req.url?.startsWith("/oauth/authorize")) {
     if (!useOAuth) {
+      log(404, req, "OAuth not configured");
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "OAuth not configured" }));
       return;
@@ -271,6 +282,7 @@ async function requestHandler(
       urlObj.searchParams.get("code_challenge_method") ?? undefined;
 
     if (!redirectUri) {
+      log(400, req, "missing redirect_uri");
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "missing redirect_uri" }));
       return;
@@ -288,6 +300,7 @@ async function requestHandler(
     redirect.searchParams.set("code", code);
     if (state) redirect.searchParams.set("state", state);
 
+    log(302, req, `client_id=${clientId} redirect=${redirectUri}`);
     res.writeHead(302, { Location: redirect.toString() });
     res.end();
     return;
@@ -296,6 +309,7 @@ async function requestHandler(
   // ── OAuth token endpoint ─────────────────────────────────────────────────
   if (req.method === "POST" && req.url === "/oauth/token") {
     if (!useOAuth) {
+      log(404, req, "OAuth not configured");
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "OAuth not configured" }));
       return;
@@ -311,6 +325,7 @@ async function requestHandler(
 
       const entry = authCodeStore.get(code);
       if (!entry || Date.now() > entry.expires) {
+        log(400, req, "invalid_grant (code not found or expired)");
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "invalid_grant" }));
         return;
@@ -318,6 +333,7 @@ async function requestHandler(
       authCodeStore.delete(code); // single-use
 
       if (entry.redirect_uri !== redirectUri) {
+        log(400, req, `redirect_uri_mismatch: got=${redirectUri} want=${entry.redirect_uri}`);
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "redirect_uri_mismatch" }));
         return;
@@ -326,6 +342,7 @@ async function requestHandler(
       // Verify PKCE if present
       if (entry.code_challenge && entry.code_challenge_method) {
         if (!codeVerifier) {
+          log(400, req, "missing code_verifier");
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "missing code_verifier" }));
           return;
@@ -337,12 +354,14 @@ async function requestHandler(
             entry.code_challenge_method
           )
         ) {
+          log(400, req, "PKCE verification failed");
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_grant" }));
           return;
         }
       }
 
+      log(200, req, `token issued (grant=authorization_code)`);
       const token = issueToken();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ...token, token_type: "Bearer" }));
@@ -354,16 +373,19 @@ async function requestHandler(
         params.get("client_id") !== OAUTH_CLIENT_ID ||
         params.get("client_secret") !== OAUTH_CLIENT_SECRET
       ) {
+        log(401, req, "invalid_client");
         res.writeHead(401, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "invalid_client" }));
         return;
       }
+      log(200, req, "token issued (grant=client_credentials)");
       const token = issueToken();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ...token, token_type: "Bearer" }));
       return;
     }
 
+    log(400, req, `unsupported_grant_type: ${grantType}`);
     res.writeHead(400, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "unsupported_grant_type" }));
     return;
@@ -373,6 +395,7 @@ async function requestHandler(
   const authHeader = req.headers["authorization"] ?? "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
   if (!isValidToken(token)) {
+    log(401, req, "no valid Bearer token");
     res.writeHead(401, {
       "Content-Type": "application/json",
       "WWW-Authenticate": `Bearer realm="${SERVER_URL}", resource_metadata="${SERVER_URL}/.well-known/oauth-protected-resource"`,
@@ -382,19 +405,21 @@ async function requestHandler(
   }
 
   // ── MCP endpoint ─────────────────────────────────────────────────────────
-  if (req.method !== "POST" || req.url !== "/mcp") {
+  if (req.url !== "/mcp") {
+    log(404, req);
     res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Not found. Use POST /mcp" }));
+    res.end(JSON.stringify({ error: "Not found. Use /mcp" }));
     return;
   }
 
+  log(200, req, "MCP request");
   const server = createMcpServer();
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless
   });
   await server.connect(transport);
-  const raw = await readBodyRaw(req);
-  await transport.handleRequest(req, res, raw ? JSON.parse(raw) : {});
+  const raw = req.method === "POST" ? await readBodyRaw(req) : undefined;
+  await transport.handleRequest(req, res, raw ? JSON.parse(raw) : undefined);
   await server.close();
 }
 
