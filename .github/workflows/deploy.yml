@@ -22,8 +22,16 @@ jobs:
 
             git pull origin main
 
-            npm ci --omit=dev
-            npm run build
+            docker build -t claude-gitlab-mcp .
 
-            sudo systemctl restart claude-gitlab-mcp
-            sudo systemctl is-active --quiet claude-gitlab-mcp && echo "Service is running"
+            docker stop claude-gitlab-mcp 2>/dev/null || true
+            docker rm claude-gitlab-mcp 2>/dev/null || true
+
+            docker run -d \
+              --name claude-gitlab-mcp \
+              --env-file .env \
+              -p 3003:3003 \
+              --restart unless-stopped \
+              claude-gitlab-mcp
+
+            docker ps --filter name=claude-gitlab-mcp --format "{{.Status}}"
