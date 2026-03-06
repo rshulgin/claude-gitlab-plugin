@@ -31,8 +31,17 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ReadResourceRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import {
+  GITLAB_FILE_TEMPLATE,
+  GITLAB_JOB_LOG_TEMPLATE,
+  readGitlabResource,
+  readJobLogResource,
+  parseJobLogUri,
+} from "./resources.js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { GitLabClient } from "./gitlab-client.js";
@@ -163,7 +172,7 @@ const toolMap = new Map<string, ToolHandler>(
 function createMcpServer(): Server {
   const server = new Server(
     { name: "claude-gitlab-plugin", version: "1.0.0" },
-    { capabilities: { tools: {} } }
+    { capabilities: { tools: {}, resources: {} } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -173,6 +182,45 @@ function createMcpServer(): Server {
       inputSchema: zodToJsonSchema(t.inputSchema) as Tool["inputSchema"],
     }));
     return { tools };
+  });
+
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+    resourceTemplates: [
+      {
+        uriTemplate: GITLAB_FILE_TEMPLATE,
+        name: "GitLab file",
+        description:
+          "Read a file from a GitLab repository. " +
+          "Prefer this over the gitlab_get_file tool when reading files multiple times — " +
+          "the MCP client caches the content and avoids repeating it in the conversation. " +
+          "URI format: gitlab://{project_id}/{ref}/{file_path} " +
+          "(project_id may be a numeric ID or URL-encoded path like group%2Frepo)",
+        mimeType: "text/plain",
+      },
+      {
+        uriTemplate: GITLAB_JOB_LOG_TEMPLATE,
+        name: "GitLab job log",
+        description:
+          "Read the console log of a CI/CD job. " +
+          "Prefer this over the gitlab_get_job_log tool — job logs can be very large " +
+          "and using a resource avoids duplicating them in the conversation history. " +
+          "URI format: gitlab-job-log://{project_id}/{job_id}",
+        mimeType: "text/plain",
+      },
+    ],
+  }));
+
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const { uri } = request.params;
+    try {
+      const content = parseJobLogUri(uri)
+        ? await readJobLogResource(client, uri)
+        : await readGitlabResource(client, uri);
+      return { contents: [content] };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Resource read failed: ${message}`);
+    }
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
