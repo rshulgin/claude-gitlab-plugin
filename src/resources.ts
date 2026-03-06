@@ -1,0 +1,76 @@
+import { GitLabClient } from "./gitlab-client.js";
+
+/**
+ * MCP Resources for GitLab files.
+ *
+ * URI scheme: gitlab://{project_id}/{ref}/{file_path}
+ *
+ * Examples:
+ *   gitlab://mygroup%2Fmyrepo/main/src/index.ts
+ *   gitlab://42/feature-branch/README.md
+ *
+ * Using resources instead of the gitlab_get_file tool reduces token usage:
+ * resource contents are loaded once by the MCP client and can be referenced
+ * without repeating the full file content in the conversation history.
+ */
+
+export const GITLAB_RESOURCE_TEMPLATE = "gitlab://{project_id}/{ref}/{+file_path}";
+
+export function parseGitlabUri(uri: string): {
+  project_id: string;
+  ref: string;
+  file_path: string;
+} | null {
+  const match = uri.match(/^gitlab:\/\/([^/]+)\/([^/]+)\/(.+)$/);
+  if (!match) return null;
+  return {
+    project_id: decodeURIComponent(match[1]),
+    ref: match[2],
+    file_path: match[3],
+  };
+}
+
+export async function readGitlabResource(
+  client: GitLabClient,
+  uri: string
+): Promise<{ uri: string; mimeType: string; text: string }> {
+  const parsed = parseGitlabUri(uri);
+  if (!parsed) {
+    throw new Error(
+      `Invalid GitLab resource URI: "${uri}". Expected format: gitlab://{project_id}/{ref}/{file_path}`
+    );
+  }
+
+  const file = await client.getFile(parsed.project_id, parsed.file_path, parsed.ref);
+  const text =
+    file.encoding === "base64"
+      ? Buffer.from(file.content, "base64").toString("utf-8")
+      : file.content;
+
+  return { uri, mimeType: guessMimeType(parsed.file_path), text };
+}
+
+function guessMimeType(filePath: string): string {
+  const ext = filePath.split(".").pop()?.toLowerCase();
+  const map: Record<string, string> = {
+    ts: "text/plain",
+    tsx: "text/plain",
+    js: "text/javascript",
+    jsx: "text/javascript",
+    json: "application/json",
+    md: "text/markdown",
+    yml: "text/yaml",
+    yaml: "text/yaml",
+    py: "text/x-python",
+    rb: "text/x-ruby",
+    go: "text/x-go",
+    rs: "text/x-rust",
+    java: "text/x-java",
+    sh: "text/x-sh",
+    html: "text/html",
+    css: "text/css",
+    sql: "text/x-sql",
+    dockerfile: "text/plain",
+  };
+  return map[ext ?? ""] ?? "text/plain";
+}

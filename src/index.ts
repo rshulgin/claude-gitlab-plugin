@@ -31,8 +31,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ReadResourceRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import { GITLAB_RESOURCE_TEMPLATE, readGitlabResource } from "./resources.js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { GitLabClient } from "./gitlab-client.js";
@@ -163,7 +166,7 @@ const toolMap = new Map<string, ToolHandler>(
 function createMcpServer(): Server {
   const server = new Server(
     { name: "claude-gitlab-plugin", version: "1.0.0" },
-    { capabilities: { tools: {} } }
+    { capabilities: { tools: {}, resources: {} } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -173,6 +176,33 @@ function createMcpServer(): Server {
       inputSchema: zodToJsonSchema(t.inputSchema) as Tool["inputSchema"],
     }));
     return { tools };
+  });
+
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+    resourceTemplates: [
+      {
+        uriTemplate: GITLAB_RESOURCE_TEMPLATE,
+        name: "GitLab file",
+        description:
+          "Read a file from a GitLab repository. " +
+          "Prefer this over the gitlab_get_file tool when reading files multiple times — " +
+          "the MCP client caches the content and avoids repeating it in the conversation. " +
+          "URI format: gitlab://{project_id}/{ref}/{file_path} " +
+          "(project_id may be a numeric ID or URL-encoded path like group%2Frepo)",
+        mimeType: "text/plain",
+      },
+    ],
+  }));
+
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const { uri } = request.params;
+    try {
+      const content = await readGitlabResource(client, uri);
+      return { contents: [content] };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Resource read failed: ${message}`);
+    }
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
