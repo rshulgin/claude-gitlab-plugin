@@ -33,14 +33,20 @@ import {
   ListToolsRequestSchema,
   ListResourceTemplatesRequestSchema,
   ReadResourceRequestSchema,
+  SubscribeRequestSchema,
+  UnsubscribeRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   GITLAB_FILE_TEMPLATE,
   GITLAB_JOB_LOG_TEMPLATE,
+  GITLAB_PIPELINE_TEMPLATE,
+  PIPELINE_TERMINAL_STATES,
   readGitlabResource,
   readJobLogResource,
+  readPipelineResource,
   parseJobLogUri,
+  parsePipelineUri,
 } from "./resources.js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -172,7 +178,7 @@ const toolMap = new Map<string, ToolHandler>(
 function createMcpServer(): Server {
   const server = new Server(
     { name: "claude-gitlab-plugin", version: "1.0.0" },
-    { capabilities: { tools: {}, resources: {} } }
+    { capabilities: { tools: {}, resources: { subscribe: true } } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -183,6 +189,10 @@ function createMcpServer(): Server {
     }));
     return { tools };
   });
+
+  // Subscription registry: uri → timer handle. Lives for the server lifetime
+  // (stdio: one server per session; http: stateless, subscriptions are no-ops).
+  const subscriptions = new Map<string, ReturnType<typeof setInterval>>();
 
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
     resourceTemplates: [
@@ -207,20 +217,74 @@ function createMcpServer(): Server {
           "URI format: gitlab-job-log://{project_id}/{job_id}",
         mimeType: "text/plain",
       },
+      {
+        uriTemplate: GITLAB_PIPELINE_TEMPLATE,
+        name: "GitLab pipeline status",
+        description:
+          "Read and subscribe to the status of a CI/CD pipeline. " +
+          "Subscribe to this resource instead of polling with gitlab_get_pipeline — " +
+          "the server polls GitLab every 15 seconds and notifies the client on every " +
+          "status change, so the LLM is only woken up when something actually changes. " +
+          "Polling stops automatically when the pipeline reaches a terminal state. " +
+          "URI format: gitlab-pipeline://{project_id}/{pipeline_id}",
+        mimeType: "application/json",
+      },
     ],
   }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const { uri } = request.params;
     try {
-      const content = parseJobLogUri(uri)
-        ? await readJobLogResource(client, uri)
-        : await readGitlabResource(client, uri);
+      let content;
+      if (parsePipelineUri(uri))  content = await readPipelineResource(client, uri);
+      else if (parseJobLogUri(uri)) content = await readJobLogResource(client, uri);
+      else                          content = await readGitlabResource(client, uri);
       return { contents: [content] };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Resource read failed: ${message}`);
     }
+  });
+
+  server.setRequestHandler(SubscribeRequestSchema, async (request) => {
+    const { uri } = request.params;
+    const parsed = parsePipelineUri(uri);
+    if (!parsed || subscriptions.has(uri)) return {};
+
+    let lastStatus = "";
+
+    const timer = setInterval(async () => {
+      try {
+        const pipeline = await client.getPipeline(parsed.project_id, parsed.pipeline_id);
+
+        if (pipeline.status !== lastStatus) {
+          lastStatus = pipeline.status;
+          await server.notification({
+            method: "notifications/resources/updated",
+            params: { uri },
+          });
+        }
+
+        if (PIPELINE_TERMINAL_STATES.has(pipeline.status)) {
+          clearInterval(timer);
+          subscriptions.delete(uri);
+        }
+      } catch {
+        // GitLab API error — keep polling, don't crash
+      }
+    }, 15_000);
+
+    subscriptions.set(uri, timer);
+    return {};
+  });
+
+  server.setRequestHandler(UnsubscribeRequestSchema, async (request) => {
+    const timer = subscriptions.get(request.params.uri);
+    if (timer) {
+      clearInterval(timer);
+      subscriptions.delete(request.params.uri);
+    }
+    return {};
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
