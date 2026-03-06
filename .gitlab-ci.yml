@@ -1,0 +1,86 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Claude Code + GitLab CI/CD
+#
+# Как это работает:
+#   1. Кто-то пишет комментарий с @claude в Issue или MR
+#   2. GitLab webhook вызывает Pipeline с переменными AI_FLOW_*
+#   3. Claude запускается внутри контейнера, читает контекст и делает изменения
+#   4. Изменения попадают в ветку и открывается MR — как обычный код-ревью
+#
+# Необходимые CI/CD Variables (Settings → CI/CD → Variables):
+#   ANTHROPIC_API_KEY   — ключ Anthropic API (masked, protected)
+#   GITLAB_TOKEN        — Personal/Project Access Token с scope api (masked)
+#
+# Опциональные переменные (при работе с @claude через webhook):
+#   AI_FLOW_INPUT       — текст команды, например "fix the login bug"
+#   AI_FLOW_CONTEXT     — URL issue/MR для контекста
+#   AI_FLOW_EVENT       — тип события: note, mr, issue
+# ─────────────────────────────────────────────────────────────────────────────
+
+stages:
+  - ai
+
+# ── Джоба для ручного запуска или по событию MR ───────────────────────────────
+claude:
+  stage: ai
+  image: node:24-alpine3.21
+
+  rules:
+    # Ручной запуск через CI/CD → Pipelines → Run pipeline
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    # Триггер через API (webhook от @claude-комментария)
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+    # Событие Merge Request (ревью, обновление MR)
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+  variables:
+    GIT_STRATEGY: fetch
+    GIT_DEPTH: 0          # полная история — нужна Claude для контекста диффов
+
+  before_script:
+    - apk update -q
+    - apk add --no-cache git curl bash jq
+
+    # Устанавливаем Claude Code CLI
+    - curl -fsSL https://claude.ai/install.sh | bash
+    - export PATH="$HOME/.local/bin:$PATH"
+
+    # Настраиваем git для коммитов от имени Claude
+    - git config --global user.email "claude-ci@gitlab.com"
+    - git config --global user.name "Claude CI"
+
+    # Настраиваем remote с токеном для пушей
+    - >
+      git remote set-url origin
+      "https://oauth2:${GITLAB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+
+  script:
+    # Запускаем встроенный GitLab MCP сервер (даёт Claude инструменты mcp__gitlab)
+    # Он читает GITLAB_TOKEN и CI_SERVER_URL автоматически
+    - /bin/gitlab-mcp-server &
+    - sleep 1   # ждём старта MCP сервера
+
+    # Логируем контекст для отладки
+    - echo "Event  : ${AI_FLOW_EVENT:-manual}"
+    - echo "Context: ${AI_FLOW_CONTEXT:-none}"
+    - echo "Input  : ${AI_FLOW_INPUT:-<default prompt>}"
+
+    # Запускаем Claude
+    - >
+      claude
+      --print
+      --permission-mode acceptEdits
+      --allowedTools "Bash Read Edit Write mcp__gitlab"
+      --max-turns 10
+      "${AI_FLOW_INPUT:-Review this repository, suggest and implement one clear improvement, then open a Merge Request with the changes.}"
+
+  timeout: 20 minutes
+
+  # Артефакты — сохраняем лог выполнения Claude для отладки
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - claude-output.log
+    reports:
+      dotenv: claude.env
