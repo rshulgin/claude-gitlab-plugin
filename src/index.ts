@@ -35,7 +35,13 @@ import {
   ReadResourceRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { GITLAB_RESOURCE_TEMPLATE, readGitlabResource } from "./resources.js";
+import {
+  GITLAB_FILE_TEMPLATE,
+  GITLAB_JOB_LOG_TEMPLATE,
+  readGitlabResource,
+  readJobLogResource,
+  parseJobLogUri,
+} from "./resources.js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { GitLabClient } from "./gitlab-client.js";
@@ -181,7 +187,7 @@ function createMcpServer(): Server {
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
     resourceTemplates: [
       {
-        uriTemplate: GITLAB_RESOURCE_TEMPLATE,
+        uriTemplate: GITLAB_FILE_TEMPLATE,
         name: "GitLab file",
         description:
           "Read a file from a GitLab repository. " +
@@ -191,13 +197,25 @@ function createMcpServer(): Server {
           "(project_id may be a numeric ID or URL-encoded path like group%2Frepo)",
         mimeType: "text/plain",
       },
+      {
+        uriTemplate: GITLAB_JOB_LOG_TEMPLATE,
+        name: "GitLab job log",
+        description:
+          "Read the console log of a CI/CD job. " +
+          "Prefer this over the gitlab_get_job_log tool — job logs can be very large " +
+          "and using a resource avoids duplicating them in the conversation history. " +
+          "URI format: gitlab-job-log://{project_id}/{job_id}",
+        mimeType: "text/plain",
+      },
     ],
   }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const { uri } = request.params;
     try {
-      const content = await readGitlabResource(client, uri);
+      const content = parseJobLogUri(uri)
+        ? await readJobLogResource(client, uri)
+        : await readGitlabResource(client, uri);
       return { contents: [content] };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

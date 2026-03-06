@@ -1,20 +1,20 @@
 import { GitLabClient } from "./gitlab-client.js";
 
 /**
- * MCP Resources for GitLab files.
+ * MCP Resources for GitLab content.
  *
- * URI scheme: gitlab://{project_id}/{ref}/{file_path}
+ * File URI:    gitlab://{project_id}/{ref}/{+file_path}
+ * Job log URI: gitlab-job-log://{project_id}/{job_id}
  *
- * Examples:
- *   gitlab://mygroup%2Fmyrepo/main/src/index.ts
- *   gitlab://42/feature-branch/README.md
- *
- * Using resources instead of the gitlab_get_file tool reduces token usage:
+ * Using resources instead of tools reduces token usage:
  * resource contents are loaded once by the MCP client and can be referenced
- * without repeating the full file content in the conversation history.
+ * without repeating the full content in the conversation history.
  */
 
-export const GITLAB_RESOURCE_TEMPLATE = "gitlab://{project_id}/{ref}/{+file_path}";
+export const GITLAB_FILE_TEMPLATE    = "gitlab://{project_id}/{ref}/{+file_path}";
+export const GITLAB_JOB_LOG_TEMPLATE = "gitlab-job-log://{project_id}/{job_id}";
+
+// ── File resource ─────────────────────────────────────────────────────────────
 
 export function parseGitlabUri(uri: string): {
   project_id: string;
@@ -49,6 +49,37 @@ export async function readGitlabResource(
 
   return { uri, mimeType: guessMimeType(parsed.file_path), text };
 }
+
+// ── Job log resource ──────────────────────────────────────────────────────────
+
+export function parseJobLogUri(uri: string): {
+  project_id: string;
+  job_id: number;
+} | null {
+  const match = uri.match(/^gitlab-job-log:\/\/([^/]+)\/(\d+)$/);
+  if (!match) return null;
+  return {
+    project_id: decodeURIComponent(match[1]),
+    job_id: parseInt(match[2], 10),
+  };
+}
+
+export async function readJobLogResource(
+  client: GitLabClient,
+  uri: string
+): Promise<{ uri: string; mimeType: string; text: string }> {
+  const parsed = parseJobLogUri(uri);
+  if (!parsed) {
+    throw new Error(
+      `Invalid job log URI: "${uri}". Expected format: gitlab-job-log://{project_id}/{job_id}`
+    );
+  }
+
+  const log = await client.getJobLog(parsed.project_id, parsed.job_id);
+  return { uri, mimeType: "text/plain", text: log };
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function guessMimeType(filePath: string): string {
   const ext = filePath.split(".").pop()?.toLowerCase();
